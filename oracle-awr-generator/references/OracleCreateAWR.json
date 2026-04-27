@@ -1,0 +1,14 @@
+--获取 开始和结束的SNAP_ID
+
+SELECT MIN(snap_id), MAX(snap_id)
+                FROM dba_hist_snapshot
+                WHERE TRUNC(end_interval_time) = TRUNC(SYSDATE - 1)
+                AND TO_CHAR(end_interval_time, 'HH24') BETWEEN '14' AND '16'
+				
+--获取 DBID				
+SELECT dbid FROM v$database				
+--获取实例号
+SELECT instance_number FROM v$instance
+
+--生成AWR
+SELECT output FROM TABLE(dbms_workload_repository.awr_report_html(dbid,instance_number,MIN(snap_id),MAX(snap_id)))

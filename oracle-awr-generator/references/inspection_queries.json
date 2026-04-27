@@ -1,0 +1,439 @@
+{
+  "version": "1.0",
+  "description": "Oracle数据库一键巡检SQL配置文件",
+  "categories": {
+    "CRITICAL": {
+      "name": "致命问题",
+      "color": "#FF0000",
+      "description": "需要立即处理的问题，可能导致实例宕机或数据丢失"
+    },
+    "HIGH": {
+      "name": "高风险问题",
+      "color": "#FF6600",
+      "description": "需要尽快处理的问题，严重影响性能或稳定性"
+    },
+    "MEDIUM": {
+      "name": "中风险问题",
+      "color": "#FFCC00",
+      "description": "需要关注的问题，可能影响性能"
+    },
+    "LOW": {
+      "name": "低风险问题",
+      "color": "#00CC00",
+      "description": "建议优化的问题，影响较小"
+    }
+  },
+  "inspections": [
+    {
+      "id": "ORA_CHECK_DATAFILE",
+      "name": "数据文件状态检查",
+      "category": "CRITICAL",
+      "description": "检查数据文件状态，OFFLINE状态需要立即处理",
+      "sql": "select name,status value from v$datafile",
+      "check_logic": {
+        "status_column": "VALUE",
+        "critical_value": "OFFLINE",
+        "critical_condition": "contains"
+      }
+    },
+    {
+      "id": "ORA_CHECK_LOGFILE",
+      "name": "日志文件状态检查",
+      "category": "CRITICAL",
+      "description": "检查日志文件状态，INVALID状态需要立即处理",
+      "sql": "select member,decode(status,'','TRUE','FALSE') STATUS,TYPE from v$logfile",
+      "check_logic": {
+        "status_column": "STATUS",
+        "critical_value": "FALSE",
+        "critical_condition": "equals"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_SESS_BLOCK",
+      "name": "会话阻塞检查",
+      "category": "CRITICAL",
+      "description": "检查是否存在会话阻塞，阻塞会导致业务停滞",
+      "sql": "select count(1) from (select s1.username || '@' || s1.machine || '(SID=' || s1.sid || ') is blocking' || s2.username || '@' || s2.machine || '(SID=' || s2.sid || ')' AS blocking_status from v$lock l1, v$session s1, v$lock l2, v$session s2 where s1.sid = l1.sid and s2.sid = l2.sid and l1.BLOCK = 1 and l2.request > 0 and l1.id1 = l2.id1 and l2.id2 = l2.id2)",
+      "check_logic": {
+        "status_column": "COUNT(1)",
+        "critical_value": "0",
+        "critical_condition": "greater_than"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_ABNORMAL_EVENT",
+      "name": "异常等待事件检查",
+      "category": "HIGH",
+      "description": "检查异常等待事件（enq%、cursor%、latch%），等待时间超过600秒需要关注",
+      "sql": "select sql_id, EVENT, waits, total_wait_itme, time_range, status from (SELECT sql_id, EVENT, count(*) waits, sum(wait_time) / 1000000 total_wait_itme, to_char(SAMPLE_TIME, 'yyy-mm-dd hh24') time_range, 'false' status FROM DBA_HIST_ACTIVE_SESS_HISTORY D WHERE D.SAMPLE_TIME > sysdate - 1 AND (D.EVENT like 'enq%' OR D.EVENT LIKE 'cursor%' or upper(event) like '%LATCH%') group by EVENT, to_char(SAMPLE_TIME, 'yyy-mm-dd hh24'), sql_id) where total_wait_itme > 600",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_INDEX_STATUS",
+      "name": "索引状态检查",
+      "category": "HIGH",
+      "description": "检查失效索引，UNUSABLE状态索引会导致查询失败或性能下降",
+      "sql": "SELECT owner index_owner,
+       index_name,
+       index_type,
+       'N/A' partition_name,
+       'N/A' subpartition_name,
+       status,
+       table_name,
+       tablespace_name
+  FROM dba_indexes t
+ WHERE status <> 'VALID'
+   and t.partitioned <> 'YES'
+   and owner not in
+       ('SYSTEM', 'SYS', 'OLAPSYS', 'XDB', 'PUBLIC', 'OUTLN', 'DBSNMP')
+UNION ALL
+SELECT a.index_owner,
+       a.index_name,
+       b.index_type,
+       a.partition_name,
+       'N/A' subpartition_name,
+       a.status,
+       b.table_name,
+       a.tablespace_name
+  FROM dba_ind_partitions a, dba_indexes b
+ WHERE a.index_name = b.index_name
+   AND a.index_owner = b.owner
+   AND a.status = 'UNUSABLE'
+   and b.owner not in
+       ('SYSTEM', 'SYS', 'OLAPSYS', 'XDB', 'PUBLIC', 'OUTLN', 'DBSNMP')
+UNION ALL
+SELECT owner index_owner,
+       a.index_name,
+       b.index_type,
+       a.partition_name,
+       a.subpartition_name,
+       a.status,
+       b.table_name,
+       a.tablespace_name
+  FROM dba_ind_subpartitions a, dba_indexes b
+ WHERE a.index_name = b.index_name
+   AND a.index_owner = b.owner
+   AND a.status = 'UNUSABLE'
+   and b.owner not in
+       ('SYSTEM', 'SYS', 'OLAPSYS', 'XDB', 'PUBLIC', 'OUTLN', 'DBSNMP')",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_PROCESSES",
+      "name": "进程数使用率检查",
+      "category": "HIGH",
+      "description": "检查进程数使用率，超过80%需要增加PROCESSES参数",
+      "sql": "select (select count(*) as a from v$process) / (select initial_allocation as b from v$resource_limit where resource_name = 'processes') as alarm_ratio from dual",
+      "check_logic": {
+        "status_column": "ALARM_RATIO",
+        "critical_value": "0.8",
+        "critical_condition": "greater_than"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_TABS_RATIO",
+      "name": "表空间使用率检查",
+      "category": "HIGH",
+      "description": "检查表空间使用率，超过85%需要扩容",
+      "sql": "SELECT D.TABLESPACE_NAME, G.AUTOEXTENSIBLE, G.ONLINE_STATUS, NVL(D.SPACE, 0) || 'M' \"SUM_SPACE(M)\", D.BLOCKS \"SUM_BLOCKS\", NVL(D.SPACE, 0) - NVL(F.FREE_SPACE, 0) || 'M' \"USED_SPACE(M)\", ROUND((1 - NVL(F.FREE_SPACE, 0) / SPACE) * 100, 2) || '%' \"USED_RATE(%)\", NVL(F.FREE_SPACE, 0) || 'M' \"FREE_SPACE(M)\", 'permanent' as \"TYPE\" FROM (SELECT TABLESPACE_NAME, ROUND(SUM(BYTES) / (1024 * 1024), 2) SPACE, SUM(BLOCKS) BLOCKS FROM DBA_DATA_FILES GROUP BY TABLESPACE_NAME) D, (SELECT TABLESPACE_NAME, ROUND(SUM(BYTES) / (1024 * 1024), 2) FREE_SPACE FROM DBA_FREE_SPACE GROUP BY TABLESPACE_NAME) F, DBA_DATA_FILES G WHERE D.TABLESPACE_NAME = F.TABLESPACE_NAME(+) and D.TABLESPACE_NAME = G.TABLESPACE_NAME(+) union SELECT D.TABLESPACE_NAME, G.AUTOEXTENSIBLE, 'ONLINE' \"ONLINE_STATUS\", D.SPACE || 'M' \"SUM_SPACE(M)\", D.BLOCKS SUM_BLOCKS, F.USED_SPACE || 'M' \"USED_SPACE(M)\", ROUND(NVL(F.USED_SPACE, 0) / D.SPACE * 100, 2) || '%' \"USED_RATE(%)\", NVL(F.FREE_SPACE, 0) || 'M' \"FREE_SPACE(M)\", 'temporary' as \"TYPE\" FROM (SELECT TABLESPACE_NAME, ROUND(SUM(NVL(BYTES, 0)) / (1024 * 1024), 2) SPACE, SUM(NVL(BLOCKS, 0)) BLOCKS FROM DBA_TEMP_FILES GROUP BY TABLESPACE_NAME) D, (SELECT TABLESPACE_NAME, ROUND(SUM(BYTES_USED) / (1024 * 1024), 2) USED_SPACE, ROUND(SUM(BYTES_FREE) / (1024 * 1024), 2) FREE_SPACE FROM V$TEMP_SPACE_HEADER GROUP BY TABLESPACE_NAME) F, DBA_TEMP_FILES G WHERE D.TABLESPACE_NAME = F.TABLESPACE_NAME(+) and D.TABLESPACE_NAME = G.TABLESPACE_NAME(+) ORDER BY 1",
+      "check_logic": {
+        "rate_column": "USED_RATE(%)",
+        "critical_value": "85",
+        "critical_condition": "greater_than"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_HARD_PARSE",
+      "name": "硬解析率检查",
+      "category": "MEDIUM",
+      "description": "检查硬解析率，超过10次/秒需要优化应用SQL或调整参数",
+      "sql": "SELECT to_char(INSTANCE_NUMBER) INSTANCE_NUMBER, SNAP_RANGE, to_char(SNAP_START) SNAP_START, to_char(SNAP_END) SNAP_END, hard_prase, 'FALSE' STATUS FROM (select G.INSTANCE_NUMBER, LAST_SNAP_ID || '~' || SNAP_ID SNAP_RANGE, G.BEGIN_INTERVAL_TIME SNAP_START, G.END_INTERVAL_TIME SNAP_END, round((G.VALUE - G.LAST_VALUE) / DUE_TIME, 2) as hard_prase, DUE_TIME, G.VALUE, G.LAST_VALUE from (select T.INSTANCE_NUMBER, T.VALUE, lag(t.value, 1, null) over(order by t.INSTANCE_NUMBER,t.snap_id) LAST_VALUE, T.SNAP_ID, lag(t.SNAP_ID, 1, null) over(order by t.INSTANCE_NUMBER,t.snap_id) LAST_SNAP_ID, D.BEGIN_INTERVAL_TIME, D.END_INTERVAL_TIME, ROUND(to_number(cast(D.END_INTERVAL_TIME as date) - cast(D.BEGIN_INTERVAL_TIME as date)) * 24 * 60 * 60) DUE_TIME from SYS.WRH$_SYSSTAT T, dba_hist_snapshot D where stat_id in (select stat_id from v$sysstat t where t.NAME = 'parse count (hard)') AND T.SNAP_ID = D.SNAP_ID AND D.BEGIN_INTERVAL_TIME>SYSDATE-7 AND T.INSTANCE_NUMBER = D.INSTANCE_NUMBER ORDER BY INSTANCE_NUMBER, SNAP_ID) G where G.LAST_VALUE IS NOT NULL) WHERE hard_prase > 10",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+
+    {
+      "id": "ORA_CHECK_LARGE_TABLLE_NOPARTITIONED",
+      "name": "大表未分区检查",
+      "category": "MEDIUM",
+      "description": "检查超过2亿行的大表是否分区",
+      "sql": "SELECT U.OWNER, U.TABLE_NAME, U.TABLESPACE_NAME FROM DBA_TABLES U WHERE U.NUM_ROWS >= 200000000 AND U.PARTITIONED = 'NO' AND U.OWNER NOT IN ('SYSTEM', 'SYS', 'OLAPSYS', 'XDB', 'PUBLIC', 'OUTLN', 'DBSNMP')",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_CURSORS",
+      "name": "游标使用率检查",
+      "category": "MEDIUM",
+      "description": "检查游标使用率，超过80%需要调整参数",
+      "sql": "select PARAMETER,value,usage,(case when usage>0.8 then 'FALSE' else 'TRUE' end)RATIO from (SELECT 'session_cached_cursors' PARAMETER, LPAD(VALUE, 5) VALUE, DECODE(VALUE, 0, ' n/a', to_char((USED / VALUE),'fm9990.00')) USAGE FROM (SELECT MAX(S.VALUE) USED FROM V$STATNAME N, V$SESSTAT S WHERE N.NAME = 'session cursor cache count' AND S.STATISTIC# = N.STATISTIC#), (SELECT VALUE FROM V$PARAMETER WHERE NAME = 'session_cached_cursors') UNION ALL SELECT 'open_cursors', LPAD(VALUE, 5), DECODE(VALUE, 0, ' n/a', to_char((USED / VALUE),'fm9990.00')) FROM (SELECT MAX(SUM(S.VALUE)) USED FROM V$STATNAME N, V$SESSTAT S WHERE N.NAME IN ('opened cursors current', 'session cursor cache count') AND S.STATISTIC# = N.STATISTIC# GROUP BY S.SID), (SELECT VALUE FROM V$PARAMETER WHERE NAME = 'open_cursors') )",
+      "check_logic": {
+        "status_column": "RATIO",
+        "critical_value": "FALSE",
+        "critical_condition": "equals"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_BUFFER_CACHE",
+      "name": "缓冲区命中率检查",
+      "category": "LOW",
+      "description": "检查Buffer Cache命中率，低于95%需要调整DB_CACHE_SIZE",
+      "sql": "select (1 - round((sum(decode(name, 'physical reads', value, 0)) / (sum(decode(name, 'db block gets', value, 0)) + (sum(decode(name, 'consistent gets', value, 0))))), 3))*100 \"Buffer Hit Ratio\" from v$sysstat",
+      "check_logic": {
+        "status_column": "Buffer Hit Ratio",
+        "critical_value": "95",
+        "critical_condition": "less_than"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_SHARPOL_RATIO",
+      "name": "库缓存命中率检查",
+      "category": "LOW",
+      "description": "检查Library Cache命中率，低于99%需要调整SHARED_POOL_SIZE",
+      "sql": "select round(sum(pinhits) / sum(pins) * 100,2) from v$librarycache",
+      "check_logic": {
+        "status_column": "ROUND(SUM(PINHITS)/SUM(PINS)*100,2)",
+        "critical_value": "99",
+        "critical_condition": "less_than"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_TEMP_TABLE",
+      "name": "临时表检查",
+      "category": "LOW",
+      "description": "检查表名结尾带数字的表数量，这类表可能是临时表",
+      "sql": "SELECT owner, COUNT(*) AS tab_count FROM dba_tables WHERE owner NOT IN ('SYS', 'SYSTEM') AND REGEXP_LIKE(table_name, '\d$') AND NOT REGEXP_LIKE(table_name, '_\d{4}$|_\d{6}$|_\d{8}$') GROUP BY owner HAVING COUNT(*) > 100 ORDER BY tab_count DESC, owner",
+      "check_logic": {
+        "status_column": "COUNT(*)",
+        "critical_value": "0",
+        "critical_condition": "greater_than"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_IDX_DEGREE",
+      "name": "索引并行度检查",
+      "category": "LOW",
+      "description": "检查索引并行度设置，degree>1可能影响性能稳定性",
+      "sql": "SELECT 'INDEX' type, owner, index_name name, degree FROM dba_indexes WHERE degree != 1 and index_type <> 'LOB' AND OWNER NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP', 'XDB')",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_DB_SEGMENTS",
+      "name": "大段对象检查",
+      "category": "LOW",
+      "description": "检查占用表空间超过5%的大段对象",
+      "sql": "select owner, segment_name, segment_type, Mb, \"tab_in_tablesp_ratio\", (case when \"tab_in_tablesp_ratio\" > 0.05 then 'FALSE' else 'TRUE' end) STATUS from (select owner, segment_name, segment_type, bytes / 1024 / 1024 Mb, b.tablespace_name, trunc((bytes / 1024 / 1024) / (b.total_space), 3) as \"tab_in_tablesp_ratio\" from (select owner, segment_name, segment_type, sum(bytes) bytes, tablespace_name FROM dba_segments where segment_type in ('TABLE', 'TABLE PARTITION') and owner not in ('SYS', 'SYSTEM', 'SYSMAN', 'PUBLIC') group by owner, segment_name, segment_type, tablespace_name ORDER BY BYTES DESC) a, (select total_space, tablespace_name from (SELECT sum(round(bytes / (1024 * 1024), 0)) total_space, tablespace_name FROM dba_data_files group by tablespace_name)) b where a.tablespace_name = b.tablespace_name) WHERE ROWNUM < 11",
+      "check_logic": {
+        "status_column": "STATUS",
+        "critical_value": "FALSE",
+        "critical_condition": "equals"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_CLIENT_PROC",
+      "name": "客户端进程统计",
+      "category": "INFO",
+      "description": "统计各客户端进程的连接数",
+      "sql": "select b.MACHINE, b.PROGRAM, count(*) from v$process a, v$session b where a.ADDR = b.PADDR and b.USERNAME is not null group by b.MACHINE, b.PROGRAM order by count(*) desc",
+      "check_logic": {
+        "result_count": "always_ok"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_SYSTEM_TABS",
+      "name": "系统表空间对象检查",
+      "category": "LOW",
+      "description": "检查非系统对象是否存储在SYSTEM,SYSAUX表空间",
+      "sql": "SELECT owner,segment_name,segment_type,tablespace_name FROM dba_segments WHERE tablespace_name IN ('SYSTEM', 'SYSAUX') AND owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP', 'SYSMAN', 'WMSYS', 'XDB', 'CTXSYS', 'MDSYS', 'ORDSYS','AUDSYS','TSMSYS','GSMADMIN_INTERNAL') ORDER BY owner, segment_type, segment_name",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_SEG",
+      "name": "回滚段检查",
+      "category": "INFO",
+      "description": "检查回滚段状态",
+      "sql": "select segment_name, status, decode(status, 'OFFLINE', 'FALSE', 'TRUE') VALUE from dba_rollback_segs where status = 'OFFLINE'",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_SEQ_RATIO",
+      "name": "序列使用率检查",
+      "category": "LOW",
+      "description": "检查序列使用率，超过95%需要扩展MAXVALUE",
+      "sql": "SELECT sequence_owner AS seq_owner,sequence_name,min_value,max_value,increment_by,cycle_flag,last_number,(max_value - last_number) AS remaining_value,ROUND(last_number / max_value * 100, 2) AS usage_percent FROM dba_sequences WHERE cycle_flag = 'N' AND increment_by > 0 AND max_value > 100000000 AND (last_number / max_value * 100) > 95 AND (max_value - last_number) < 50000000 ORDER BY usage_percent DESC, remaining_value ASC",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_JOB_STATUS",
+      "name": "JOB状态检查",
+      "category": "MEDIUM",
+      "description": "检查DBMS_JOB任务执行状态",
+      "sql": "select job, d.SCHEMA_USER what, last_date, next_date, failures, (case when failures > 0 and failures is not null then 'abnormal' when failures = 0 and failures is not null then 'normal' when failures is null then 'NOT EXECTION' end) status, broken from dba_jobs d",
+      "check_logic": {
+        "status_column": "STATUS",
+        "critical_value": "abnormal",
+        "critical_condition": "equals"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_HIST_LOAD",
+      "name": "历史负载分析",
+      "category": "INFO",
+      "description": "分析数据库历史负载情况，包括CPU使用率、I/O吞吐量、会话数等趋势",
+      "sql": "with t as (select max(snap_id) v_snap_id from dba_hist_snapshot), tmp_stat as (select instance_number as inst_id, lag(snap_id) over(partition by dbid, instance_number, stat_id order by snap_id) as bid, a.snap_id as eid, stat_name, value - lag(value) over(partition by dbid, instance_number, stat_id order by snap_id) as delta_value from dba_hist_sysstat a,t where dbid = (select dbid from v$database) and instance_number = 1 and snap_id >= t.v_snap_id-48 and snap_id <= t.v_snap_id and a.stat_name in ('db block changes','execute count','logons cumulative','opened cursors cumulative','parse count (total)','parse count (hard)','physical reads','physical writes','redo size','session cursor cache hits','session logical reads','user calls','user commits','user rollbacks','workarea executions - optimal','physical write total bytes','physical read total bytes')), tmp_snap as (select instance_number as inst_id, snap_id-1 bid, snap_id eid, to_char(end_interval_time, 'yymmdd-hh24mi') as end_time, (cast(end_interval_time as date) - cast(begin_interval_time as date)) * 24 * 60 * 60 as secs from dba_hist_snapshot,t where snap_id >= t.v_snap_id-48 and snap_id <= t.v_snap_id and dbid = (select dbid from v$database) and instance_number=1), tmp_before_pivot as (select a.inst_id, a.bid, b.end_time, a.eid, a.stat_name, round(b.secs/60) elp_mins, round(a.delta_value/b.secs, 1) per_second from tmp_stat a, tmp_snap b where a.delta_value is not null and a.inst_id = b.inst_id and a.bid = b.bid and a.eid = b.eid and b.secs > 0), tmp_load1 as (select inst_id, BID, EID||'_'||end_time as end_time, ELP_MINS as elap, round(ior_m/1024/1024, 1) as ior_m, round(iow_m/1024/1024, 1) as iow_m, round(redo_size) redo_size, round(logical_reads) l_reads, round(Block_changes) Blk_chgs, round(physical_reads) phy_reads, round(physical_writes) phy_writes, round(user_calls) u_calls, round(parses) soft_p, round(hard_parses) hard_p, round(logons) logons, round(executions) execs, round(commits) commits, round(rollbacks) rbs from tmp_before_pivot a pivot(max(per_second) for stat_name in('redo size' as redo_size, 'session logical reads' as logical_reads, 'db block changes' as Block_changes, 'physical reads' as physical_reads, 'physical writes' as physical_writes, 'user calls' as user_calls, 'parse count (total)' as parses, 'parse count (hard)' as hard_parses, 'logons cumulative' as logons, 'execute count' as executions, 'user commits' as commits, 'user rollbacks' as rollbacks, 'physical write total bytes' as iow_M, 'physical read total bytes' as ior_M))), tmp_load2 as (select * from (select sp.instance_number as inst_id, sp.snap_id-1 as begin_snap_id, sp.snap_id as end_snap_id, to_char(begin_interval_time, 'yyyy-mm-dd hh24:mi:ss') as snap_begin_time, to_char(end_interval_time, 'yyyy-mm-dd hh24:mi:ss') as snap_end_time, (cast(end_interval_time as date) - cast(begin_interval_time as date)) * 24 * 60 as interval_min, value - lag(value) over(partition by sp.instance_number, stat_name order by sp.snap_id) as lag_value, sy.stat_name from dba_hist_snapshot sp, dba_hist_sys_time_model sy where sp.snap_id = sy.snap_id and sp.instance_number = sy.instance_number and sy.stat_name in ('DB CPU', 'DB time') and sp.instance_number =1) pivot(sum(lag_value) for stat_name in('DB CPU' as db_cpu, 'DB time' as db_time)) where nvl(db_cpu,0) >0 and nvl(db_time,0) >0) select a.inst_id, BID, end_time, elap, to_char(round(db_cpu/60/1000000/interval_min, 2),'fm9990.0099') as db_cpu_s, to_char(round(db_time/60/1000000/interval_min, 2),'fm9990.0099') as db_time_s, to_char(ior_m,'fm9990.0099') ior_m, to_char(iow_m,'fm9990.0099') iow_m, to_char(round(redo_size/1024)) as redo_k, l_reads, Blk_chgs, phy_reads, phy_writes, u_calls, soft_p, hard_p, logons, execs, commits, rbs from tmp_load1 a, tmp_load2 b where a.bid = b.begin_snap_id and a.inst_id = b.inst_id order by 1, 2",
+      "check_logic": {
+        "result_count": "always_ok"
+      }
+    },
+    {
+      "id": "ORA_CHECK_REDO_SWITCH",
+      "name": "Redo日志切换频率检查",
+      "category": "HIGH",
+      "description": "检查Redo日志切换频率，每小时切换超过12次表示日志文件过小或DML活动过于频繁",
+      "sql": "SELECT TO_CHAR(FIRST_TIME, 'YYYY-MM-DD HH24') HOUR, COUNT(*) SWITCH_COUNT, ROUND(COUNT(*) / 60.0, 2) SWITCHES_PER_MIN, (CASE WHEN COUNT(*) > 12 THEN 'WARNING' ELSE 'NORMAL' END) STATUS FROM V$LOG_HISTORY WHERE FIRST_TIME >= SYSDATE-1 GROUP BY TO_CHAR(FIRST_TIME, 'YYYY-MM-DD HH24') ORDER BY HOUR DESC",
+      "check_logic": {
+        "status_column": "STATUS",
+        "critical_value": "WARNING",
+        "critical_condition": "equals"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_HIGH_VERSION_COUNT",
+      "name": "执行计划高版本检查",
+      "category": "HIGH",
+      "description": "检查存在执行计划高版本的SQL",
+      "sql": "select sql_id, sql_text, version_count, plan_hash_value, nvl(module, 'null') module from v$sqlarea where version_count > 500",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_TAB_STATISTICS",
+      "name": "表统计信息检查",
+      "category": "HIGH",
+      "description": "检查是否存在统计信息过期的表",
+      "sql": "select OWNER, TABLE_NAME, LAST_ANALYZED, NUM_ROWS, STALE_STATS from dba_tab_statistics b where owner not in ('SYS','SYSTEM','DBSNMP','OUTLN','XDB','GSMADMIN_INTERNAL','APPQOSSYS','WMSYS','SQLTXPLAIN','CTXSYS') AND NOT REGEXP_LIKE(TABLE_NAME, '[[:digit:]]') AND OBJECT_TYPE = 'TABLE' AND stattype_locked IS NULL AND STALE_STATS = 'YES' and LAST_ANALYZED < sysdate - 2 order by LAST_ANALYZED",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+    {
+      "id": "ORA_CHECK_HISTORICAL_TABLESPACE_USAGE",
+      "name": "表空间使用历史",
+      "category": "HIGH",
+      "description": "查看表空间使用历史数据",
+      "sql": "SELECT a.snap_id,c.tablespace_name ts_name,to_char(to_date(a.rtime, 'mm/dd/yyyy hh24:mi:ss'),'yyyy-mm-dd hh24:mi') rtime,
+       round(a.tablespace_size * c.block_size / 1024 / 1024, 2) ts_size_mb,round(a.tablespace_usedsize * c.block_size / 1024 / 1024, 2) ts_used_mb,
+       round((a.tablespace_size - a.tablespace_usedsize) * c.block_size / 1024 / 1024, 2) ts_free_mb,
+       round(a.tablespace_usedsize / a.tablespace_size * 100, 2) pct_used
+  FROM dba_hist_tbspc_space_usage a,
+       (SELECT tablespace_id,
+               substr(rtime, 1, 10) rtime,
+               max(snap_id) snap_id
+          FROM dba_hist_tbspc_space_usage nb
+         group by tablespace_id, substr(rtime, 1, 10)) b,
+       dba_tablespaces c,
+       v$tablespace d
+ where a.snap_id = b.snap_id
+   and a.tablespace_id = b.tablespace_id
+   and a.tablespace_id = d.TS#
+   and d.NAME = c.tablespace_name
+   and c.TABLESPACE_NAME not like 'TEMP%'
+   and c.TABLESPACE_NAME not like 'UNDO%'
+   and to_date(a.rtime, 'mm/dd/yyyy hh24:mi:ss') >= sysdate - 30
+ order by a.tablespace_id, to_date(a.rtime, 'mm/dd/yyyy hh24:mi:ss') ",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    },
+	{
+      "id": "ORA_CHECK_NUNBER_PARTITIONS",
+      "name": "分区表分区数量检查",
+      "category": "HIGH",
+      "description": "检查分区表的分区数量,超过26个分区需要检查",
+      "sql": "WITH partition_counts AS (SELECT table_owner AS owner,
+         table_name,
+         COUNT(*) AS partition_count,
+         0 AS subpartition_count
+    FROM dba_tab_partitions
+   WHERE UPPER(PARTITION_NAME) LIKE 'SYS%'
+     AND REGEXP_LIKE(PARTITION_NAME, '[0-9]$')
+   GROUP BY table_owner, table_name),
+subpartition_counts AS
+ (SELECT table_owner AS owner,
+         table_name,
+         0 AS partition_count,
+         COUNT(*) AS subpartition_count
+    FROM dba_tab_subpartitions
+   where UPPER(PARTITION_NAME) LIKE 'SYS%'
+     AND REGEXP_LIKE(PARTITION_NAME, '[0-9]$')
+   GROUP BY table_owner, table_name),
+combined AS
+ (SELECT owner,
+         table_name,
+         SUM(partition_count) AS part_count,
+         SUM(subpartition_count) AS subpart_count
+    FROM (SELECT *
+            FROM partition_counts
+          UNION ALL
+          SELECT *
+            FROM subpartition_counts)
+   GROUP BY owner, table_name)
+SELECT c.owner                 AS owner,
+       c.table_name            AS table_name,
+       pt.partitioning_type    AS partitioning_type,
+       pt.subpartitioning_type AS subpartitioning_type,
+       c.part_count,
+       c.subpart_count
+  FROM combined c
+  JOIN dba_part_tables pt
+    ON c.owner = pt.owner
+   AND c.table_name = pt.table_name
+ WHERE c.part_count > 26
+   and pt.partitioning_type <> 'HASH'
+   and pt.owner not in ('SYS', 'SYSTEM')
+ ORDER BY c.part_count DESC, c.owner, c.table_name",
+      "check_logic": {
+        "result_count": "greater_than_0"
+      }
+
+    }
+  ]
+}
